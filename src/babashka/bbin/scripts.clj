@@ -52,10 +52,11 @@
   (let [scripts (load-scripts (dirs/bin-dir cli-opts))]
     (if (:edn cli-opts)
       (util/pprint scripts cli-opts)
-      (do
-        (println)
-        (util/print-scripts (util/printable-scripts scripts) cli-opts)
-        (println)))))
+      (let [fmt         (if (util/plain-mode? cli-opts)
+                          "%s" ;; prevent extra lines for non-tty
+                          "\n%s\n")
+            scripts-str (with-out-str (util/print-scripts (util/printable-scripts scripts) cli-opts))]
+        (print (format fmt scripts-str))))))
 
 (defn bin [cli-opts]
   (println (str (dirs/bin-dir cli-opts))))

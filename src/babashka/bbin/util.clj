@@ -128,13 +128,15 @@
   ```clojure
   ;; Extract columns from rows
   (print-table [{:a \"one\" :b \"two\"}])
+  ;; rows being collection of tuples (ensures order of headers):
+  (print-table [[[:a \"one\"] [:b \"two\"]]])
 
   a    b
   ───  ───
   one  two
 
-  ;; Provide columns (as b is an empty column, it will be skipped)
-  (print-table [:a :b] [{:a \"one\" :b nil}])
+  ;; Provide (order of) columns (as b is an empty column, it will be skipped)
+  (print-table [:b :a] [{:a \"one\" :b nil}])
 
   a
   ───
@@ -143,8 +145,9 @@
   ;; Ensure all columns being shown:
   (print-table [:a :b] [{:a \"one\"}] {:show-empty-columns true})
 
-  ;; Provide columns with labels and apply column coercion
-  (print-table {:a \"option A\" :b \"option B\"} [{:a \"one\" :b nil}]
+  ;; Provide ordered columns with labels and apply column coercion
+  (print-table [[:a \" option A \"] [:b \" option B \"]]
+               [{:a \"one\" :b nil}]
                {:column-coercions {:b (fnil boolean false)}})
 
   option A  option B
@@ -161,7 +164,8 @@
   ;; A custom `width-reduce-fn` can be provided. See options for details.
   (print-table {:a \"123456\"} {:max-width 5
                                 :width-reduce-column :a
-                                :width-reduce-fn #(subs %1 0 %2)})
+                                :width-reduce-fn (fn [value remaining-width]
+                                                   (subs value 0 remaining-width))})
   a
   ─────
   12345
@@ -181,7 +185,7 @@
   ([rows]
    (print-table rows {}))
   ([ks-rows rows-opts]
-   (let [rows->ks       #(-> % first keys)
+   (let [rows->ks       #(->> % first (map first))
          [ks rows opts] (if (map? rows-opts)
                           [(rows->ks ks-rows) ks-rows rows-opts]
                           [ks-rows rows-opts {}])]
@@ -190,52 +194,63 @@
              :keys [show-empty-columns skip-header no-color column-coercions
                     max-width width-reduce-column width-reduce-fn]
              :or   {show-empty-columns false skip-header false no-color false column-coercions {}}}]
-   (assert (or (not max-width) (and max-width ((set ks) width-reduce-column)))
-           (str "Option :max-width requires option :width-reduce-column to be one of " (pr-str ks)))
-   (let [wrap-bold            (fn [s] (if no-color s (str "\033[1m" s "\033[0m")))
-         row-get              (fn [row k]
-                                (when (contains? row k)
-                                  ((column-coercions k identity) (get row k))))
-         key->label           (if (map? ks) ks #(subs (str (keyword %)) 1))
-         header-keys          (if (map? ks) (keys ks) ks)
-         ;; ensure all header-keys exist for every row and every value is a string
-         rows                 (map (fn [row]
-                                     (reduce (fn [acc k]
-                                               (assoc acc k (str (row-get row k)))) {} header-keys)) rows)
-         header-keys          (if show-empty-columns
-                                header-keys
-                                (let [non-empty-cols (remove
-                                                      (fn [k] (every? str/blank? (map #(get % k) rows)))
-                                                      header-keys)]
-                                  (filter (set non-empty-cols) header-keys)))
-         header-labels        (map key->label header-keys)
-         column-widths        (reduce (fn [acc k]
-                                        (let [val-widths (map count (cons (key->label k)
-                                                                          (map #(get % k) rows)))]
-                                          (assoc acc k (apply max val-widths)))) {} header-keys)
-         row-fmt              (str/join "  " (map #(str "%-" (column-widths %) "s") header-keys))
-         cells->formatted-row #(apply format row-fmt %)
-         plain-header-row     (cells->formatted-row header-labels)
-         required-width       (count plain-header-row)
-         header-row           (wrap-bold plain-header-row)
-         max-width-exceeded?  (and max-width
-                                   (> required-width max-width))
-         div-row              (wrap-bold
-                               (cells->formatted-row
-                                (map (fn [k]
-                                       (apply str (take (column-widths k) (repeat \u2500)))) header-keys)))
-         data-rows            (map #(cells->formatted-row (map % header-keys)) rows)]
-     (if-not max-width-exceeded?
-       (when (seq header-keys)
-         (let [header (if skip-header (vector) (vector header-row div-row))]
-           (println (apply str (interpose \newline (into header data-rows))))))
-       (let [overflow         (- required-width max-width)
-             max-column-width (max 0 (- (column-widths width-reduce-column) overflow))
-             width-reduce-fn  (or width-reduce-fn #(truncate %1 {:truncate-to %2}))
-             coercion-fn      #(width-reduce-fn % max-column-width)]
-         (recur ks rows (assoc opts
-                               :max-width nil
-                               :column-coercions {width-reduce-column coercion-fn})))))))
+   (let [header-labels? (sequential? (first ks))
+         header-keys    (if header-labels? (map first ks) ks)]
+     (assert (or (not max-width) (and max-width ((set header-keys) width-reduce-column)))
+             (str "Option :max-width requires option :width-reduce-column to be one of " (pr-str header-keys)))
+     (let [wrap-bold            (fn [s] (if no-color s (str "\033[1m" s "\033[0m")))
+           row-get              (fn [row k]
+                                  (let [row (if (map? row) row (into {} row))]
+                                    (when (contains? row k)
+                                      ((column-coercions k (comp str/trimr str)) (get row k)))))
+           key->label           (if header-labels?
+                                  #(get (into {} ks) % %)
+                                  #(subs (str (keyword %)) 1))
+           ;; ensure all header-keys exist for every row and every value is a string
+           rows                 (map (fn [row]
+                                       (reduce (fn [acc k]
+                                                 (assoc acc k (str (row-get row k)))) {} header-keys)) rows)
+           header-keys          (if show-empty-columns
+                                  header-keys
+                                  (let [non-empty-cols (remove
+                                                        (fn [k] (every? str/blank? (map #(get % k) rows)))
+                                                        header-keys)]
+                                    (filter (set non-empty-cols) header-keys)))
+           header-labels        (map key->label header-keys)
+           column-widths        (reduce (fn [acc k]
+                                          (let [val-widths (map count (cons (key->label k)
+                                                                            (map #(get % k) rows)))]
+                                            (assoc acc k (apply max val-widths)))) {} header-keys)
+           row-fmt              (if skip-header
+                                  (str/join "\t" (repeat (count column-widths) "%s"))
+                                  (str/join "  " (map #(str "%-" (column-widths %) "s") header-keys)))
+           cells->formatted-row (fn cells->formatted-row
+                                  ([cells]
+                                   (cells->formatted-row cells {:trim true}))
+                                  ([cells {:keys [trim]}]
+                                   (cond-> (apply format row-fmt cells)
+                                     trim str/trimr)))
+           plain-header-row     (cells->formatted-row header-labels {:trim false})
+           required-width       (count plain-header-row)
+           max-width-exceeded?  (and max-width
+                                     (> required-width max-width))
+           header-row           (wrap-bold plain-header-row)
+           div-row              (wrap-bold
+                                 (cells->formatted-row
+                                  (map (fn [k]
+                                         (apply str (take (column-widths k) (repeat \u2500)))) header-keys)))
+           data-rows            (map #(cells->formatted-row (map % header-keys)) rows)]
+       (if-not max-width-exceeded?
+         (when (seq header-keys)
+           (let [header (if skip-header (vector) (vector header-row div-row))]
+             (println (apply str (interpose \newline (into header data-rows))))))
+         (let [overflow         (- required-width max-width)
+               max-column-width (max 0 (- (column-widths width-reduce-column) overflow))
+               width-reduce-fn  (or width-reduce-fn #(truncate %1 {:truncate-to %2}))
+               coercion-fn      #(width-reduce-fn % max-column-width)]
+           (recur ks rows (assoc opts
+                                 :max-width nil
+                                 :column-coercions {width-reduce-column coercion-fn}))))))))
 
 (defn edn? [cli-opts]
   (:edn cli-opts))
